@@ -1,1 +1,0 @@
-echo "insert into user values('foo', 'foo', 'foo', 'foo', 'foo');" | sqlite3 /$KOBOPATH.kobo/KoboReader.sqlite
