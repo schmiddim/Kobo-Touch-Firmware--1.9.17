@@ -1,0 +1,156 @@
+#!/bin/sh
+
+MODULE_LOADED=`lsmod | grep -c g_file_storage`
+USE_MODUTILS=1
+
+PLATFORM=freescale
+VENDOR_ID=0x2237
+PRODUCT_ID=0x4163
+INTERFACE=wlan0
+WIFI_MODULE=ar6000
+
+if [ `dd if=/dev/mmcblk0 bs=512 skip=1024 count=1 | grep -c "HW CONFIG"` == 1 ]; then
+	if [ -e /drivers/ntx508 ]; then
+		PLATFORM=ntx508
+		INTERFACE=eth0
+		WIFI_MODULE=dhd
+
+	else
+		if [ `dd if=/dev/mmcblk0 bs=512 skip=1024 count=1 | grep -c "v0.7"` == 1 ]; then
+			PLATFORM=m166e
+			PRODUCT_ID=0x4165
+			INTERFACE=eth0
+
+		elif [ -e /drivers/netronix ]; then
+			PLATFORM=netronix
+			PRODUCT_ID=0x4162
+			INTERFACE=eth0
+
+        		if [ `/bin/ntx_hwconfig -s /dev/mmcblk0 Wifi | grep -c AW-GH381` == 1 ]; then
+                		WIFI_MODULE=sd8xxx
+                		WIFI_MODULE_PARAMS="helper_name=/lib/firmware/mrvl/helper_sd.bin fw_name=/lib/firmware/mrvl/sd8688.bin"
+        		else
+                		WIFI_MODULE=sd8686
+                		WIFI_MODULE_PARAMS="helper_name=/lib/firmware/mrvl/helper_sd.bin fw_name=/lib/firmware/mrvl/sd8686.bin"
+        		fi
+
+			export WIFI_MODULE_PARAMS
+		fi
+	fi
+fi
+
+DEV="/dev/mmcblk1p1"
+if [ -e /dev/mmcblk1p1 ]; then
+	LUNS=/dev/mmcblk0p3,/dev/mmcblk1p1
+else
+	LUNS=/dev/mmcblk0p3
+fi
+
+PARAMS="vendor=$VENDOR_ID product=$PRODUCT_ID vendor_id=Kobo product_id=eReader SN=$SN"
+
+if [ "$ACTION" == "add" ]; then
+	sync
+	umount -l /mnt/onboard
+	umount -l /mnt/sd
+
+	/sbin/insmod /drivers/$PLATFORM/usb/gadget/arcotg_udc.ko
+	sleep 2
+
+	if [ $USE_MODUTILS == 0 ]; then
+		j=0;
+		for i in $LUNS; do
+			echo $i > /sys/devices/platform/fsl-usb2-udc/gadget/gadget-lun$j/file
+			j=$(($j+1))
+		done
+	else
+		/sbin/insmod /drivers/$PLATFORM/usb/gadget/g_file_storage.ko file=$LUNS stall=1 removable=1 $PARAMS
+	fi
+	sleep 1
+
+elif [ "$ACTION" == "remove" ]; then
+	if [ $MODULE_LOADED -eq 0 ]; then
+		exit
+	fi
+
+	/sbin/rmmod g_file_storage
+	/sbin/rmmod arcotg_udc
+	sleep 1
+
+	if [ -e /drivers/$PLATFORM ]; then
+		PARTITION=/dev/mmcblk0p3
+		MOUNTARGS="noatime,nodiratime,iocharset=utf8"
+	fi
+
+	dosfsck -a -w $PARTITION
+	mount -o $MOUNTARGS -t vfat $PARTITION /mnt/onboard
+
+	if [ -e $DEV ]; then
+		mount -r -t vfat -o shortname=mixed $DEV /mnt/sd
+		if [ $? != 0 ]; then
+			mount -r $DEV /mnt/sd
+		fi
+	fi
+
+	sleep 1
+
+	rm -rf /mnt/onboard/fsck*
+	rm -rf /mnt/onboard/FSCK*
+
+	if [ -e /mnt/onboard/.kobo/KoboRoot.tgz ]; then
+		kill -9 `pidof nickel`
+		zcat /etc/images/ghostbuster.raw.gz | /usr/local/Kobo/pickel showpic
+		if [ $PLATFORM == ntx508 ] || [ $PLATFORM == freescale ]; then
+			/etc/init.d/update-animator.sh &
+		else
+			zcat /etc/images/one_moment_please.raw.gz | /usr/local/Kobo/pickel showpic
+		fi
+		zcat /mnt/onboard/.kobo/KoboRoot.tgz > /dev/null && tar zxf /mnt/onboard/.kobo/KoboRoot.tgz -C /
+		rm /mnt/onboard/.kobo/KoboRoot.tgz
+		if [ -e /mnt/onboard/.kobo/upgrade ]; then
+			/etc/init.d/upgrade-wifi.sh
+			rm -rf /mnt/onboard/.kobo/upgrade
+		fi
+		killall update-animator.sh
+		zcat /etc/images/ghostbuster.raw.gz | /usr/local/Kobo/pickel showpic
+		zcat /etc/images/reboot.raw.gz | /usr/local/Kobo/pickel showpic
+		sync
+		reboot
+	fi
+
+	if [ -e /mnt/onboard/.kobo/Kobo.tgz ]; then
+		kill -9 `pidof nickel`
+		zcat /etc/images/ghostbuster.raw.gz | /usr/local/Kobo/pickel showpic
+		if [ $PLATFORM == ntx508 ] || [ $PLATFORM == freescale ]; then
+			/etc/init.d/update-animator.sh &
+		else
+			zcat /etc/images/one_moment_please.raw.gz | /usr/local/Kobo/pickel showpic
+		fi
+		zcat /mnt/onboard/.kobo/Kobo.tgz > /dev/null && tar zxf /mnt/onboard/.kobo/Kobo.tgz -C /usr/local/Kobo/
+		rm /mnt/onboard/.kobo/Kobo.tgz
+		sync
+		echo "Done upgrading..."
+
+		export PLATFORM
+		export NICKEL_HOME=/mnt/onboard/.kobo
+		export LD_LIBRARY_PATH=/usr/local/Kobo
+		export LANG=en_US.UTF-8
+
+		if [ $PLATFORM == netronix ] || [ $PLATFORM == m166e ]; then
+			export QWS_KEYBOARD=netronix
+			/usr/local/Kobo/nickel -qws -display broadsheet_ioctl &
+
+		elif [ $PLATFORM == freescale ] || [ $PLATFORM == ntx508 ]; then
+			export QWS_MOUSE_PROTO=tslib_nocal:/dev/input/event1
+			export QWS_KEYBOARD=imx508kbd:/dev/input/event0
+			export QWS_DISPLAY=Transformed:imx508:Rot90
+			export INTERFACE
+			export WIFI_MODULE
+			export WIFI_MODULE_PATH=/drivers/$PLATFORM/wifi/$WIFI_MODULE.ko
+
+			/usr/local/Kobo/nickel -qws &
+		fi
+
+		killall update-animator.sh
+		rmmod $WIFI_MODULE;
+	fi
+fi
